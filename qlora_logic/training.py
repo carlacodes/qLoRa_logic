@@ -3,6 +3,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model, TaskType
+from datasets import DatasetDict
 
 class QLoRAFineTuner:
     def __init__(self):
@@ -14,10 +15,16 @@ class QLoRAFineTuner:
 
     def load_tokenizer_and_model(self):
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token  # Use EOS token as padding token
+
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             load_in_8bit=True,
-            device_map="auto"
+            device_map="auto",
+            llm_int8_enable_fp32_cpu_offload=True
+
         )
         self.model.gradient_checkpointing_enable()
 
@@ -33,7 +40,17 @@ class QLoRAFineTuner:
                 max_length=64,  # Reduced sequence length to save memory
                 padding="max_length"
             )
-        self.processed_dataset = self.dataset.map(tokenize_function, batched=True)
+
+        tokenized_dataset = self.dataset.map(tokenize_function, batched=True)
+
+        # Train/Test Split
+        train_test = tokenized_dataset["train"].train_test_split(test_size=0.2, seed=42)
+        self.processed_dataset = DatasetDict({
+            "train": train_test["train"],
+            "validation": train_test["test"].train_test_split(test_size=0.5, seed=42)["test"],
+            # Create validation and test
+            "test": train_test["test"].train_test_split(test_size=0.5, seed=42)["train"],
+        })
 
     def configure_lora(self):
         lora_config = LoraConfig(
