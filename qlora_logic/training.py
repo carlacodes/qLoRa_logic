@@ -34,33 +34,47 @@ class QLoRAFineTuner:
         self.dataset = load_dataset(self.dataset_name)
 
     def tokenize_dataset(self):
+        # Get the tokenizer's max supported length
+        max_length = self.tokenizer.model_max_length
+        print(f"Tokenizer max length: {max_length}")
+
+        # Function to check if the combined input length is within limits
+        def filter_function(example):
+            input_text = f"Instruction: {example['instruction']} [SEP] Response: {example['response']}"
+            tokenized_length = len(self.tokenizer(input_text, truncation=False)["input_ids"])
+            return tokenized_length <= max_length
+
+        # Filter out examples exceeding max length
+        self.dataset = self.dataset.filter(filter_function)
+
         def tokenize_function(example):
             # Concatenate instruction and response
             input_text = f"Instruction: {example['instruction']} [SEP] Response: {example['response']}"
 
-            # Tokenize the sequence
+            # Tokenize with truncation and padding
             tokenized = self.tokenizer(
                 input_text,
-                truncation=True,  # Ensure sequences are truncated to max model length
-                max_length=self.tokenizer.model_max_length,  # Use model's max length dynamically
-                padding="max_length"  # Pad sequences shorter than max length
+                truncation=True,  # Ensure truncation
+                max_length=max_length,  # Respect max length
+                padding="max_length"  # Pad to max length
             )
 
-            # Mask the `instruction` segment in the loss by setting them to -100
+            # Mask the instruction segment in the loss by setting them to -100
             labels = tokenized["input_ids"].copy()
             instruction_length = len(
-                self.tokenizer(f"Instruction: {example['instruction']} [SEP]")["input_ids"]
+                self.tokenizer(f"Instruction: {example['instruction']} [SEP]", truncation=True, max_length=max_length)[
+                    "input_ids"]
             )
             labels[:instruction_length] = [-100]  # Ignore loss for instruction
 
             tokenized["labels"] = labels
             return tokenized
 
+        # Tokenize dataset
         tokenized_dataset = self.dataset.map(
             tokenize_function,
             batched=True,
-            remove_columns=self.dataset["train"].column_names,  # Remove original columns
-            batch_size=32  # Process in batches for efficiency
+            batch_size=16  # Use a batch size suitable for your system
         )
 
         # Train/Test Split
