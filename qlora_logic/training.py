@@ -38,15 +38,18 @@ class QLoRAFineTuner:
         max_length = self.tokenizer.model_max_length
         print(f"Tokenizer max length: {max_length}")
 
-        # Function to check if the combined input length is within limits
+        # Filter dataset entries based on text length
         def filter_function(example):
+            # Rough estimate of token count by assuming average word length + spaces
             input_text = f"Instruction: {example['instruction']} [SEP] Response: {example['response']}"
-            tokenized_length = len(self.tokenizer(input_text, truncation=False)["input_ids"])
-            return tokenized_length <= max_length
+            approx_token_length = len(input_text.split())  # Approximate token count based on word count
+            return approx_token_length <= max_length * 1.5  # Adjust factor for tokenization overhead
 
-        # Filter out examples exceeding max length
+        print(f"Original dataset size: {len(self.dataset['train'])}")
         self.dataset = self.dataset.filter(filter_function)
+        print(f"Filtered dataset size: {len(self.dataset['train'])}")
 
+        # Tokenize the dataset
         def tokenize_function(example):
             # Concatenate instruction and response
             input_text = f"Instruction: {example['instruction']} [SEP] Response: {example['response']}"
@@ -54,9 +57,9 @@ class QLoRAFineTuner:
             # Tokenize with truncation and padding
             tokenized = self.tokenizer(
                 input_text,
-                truncation=True,  # Ensure truncation
-                max_length=max_length,  # Respect max length
-                padding="max_length"  # Pad to max length
+                truncation=True,
+                max_length=max_length,
+                padding="max_length"
             )
 
             # Mask the instruction segment in the loss by setting them to -100
