@@ -4,6 +4,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments,
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model, TaskType
 from datasets import DatasetDict
+from transformers import BitsAndBytesConfig
 
 class QLoRAFineTuner:
     def __init__(self):
@@ -21,10 +22,11 @@ class QLoRAFineTuner:
 
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            load_in_8bit=True,
-            device_map="auto",
-            llm_int8_enable_fp32_cpu_offload=True
-
+            quantization_config=BitsAndBytesConfig(
+                load_in_8bit=True,
+                llm_int8_enable_fp32_cpu_offload=False
+            ),
+            device_map="cuda:0"
         )
         self.model.gradient_checkpointing_enable()
 
@@ -33,14 +35,26 @@ class QLoRAFineTuner:
 
     def tokenize_dataset(self):
         def tokenize_function(example):
-            return self.tokenizer(
-                example["instruction"],
-                example["response"],
+            # Concatenate instruction and response
+            input_text = f"Instruction: {example['instruction']} [SEP] Response: {example['response']}"
+
+            # Tokenize the entire sequence
+            tokenized = self.tokenizer(
+                input_text,
                 truncation=True,
-                max_length=64,  # Reduced sequence length to save memory
+                max_length=128,  # Longer max length to accommodate both instruction and response
                 padding="max_length"
             )
 
+            # Mask `instruction` segment in the loss by setting them to -100
+            labels = tokenized["input_ids"].copy()
+            instruction_length = len(self.tokenizer(f"Instruction: {example['instruction']} [SEP]")["input_ids"])
+            labels[:instruction_length] = [-100]  # Ignore loss for instruction
+
+            tokenized["labels"] = labels
+            return tokenized
+
+        # Apply tokenization to the dataset
         tokenized_dataset = self.dataset.map(tokenize_function, batched=True)
 
         # Train/Test Split
@@ -103,4 +117,5 @@ if __name__ == "__main__":
     finetuner.tokenize_dataset()
     finetuner.configure_lora()
     finetuner.prepare_training_args()
+    print(finetuner.device)
     finetuner.train_model()
