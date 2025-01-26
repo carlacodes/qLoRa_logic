@@ -1,4 +1,3 @@
-
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer
 from datasets import load_dataset
@@ -6,10 +5,11 @@ from peft import LoraConfig, get_peft_model, TaskType
 from datasets import DatasetDict
 from transformers import BitsAndBytesConfig
 
+
 class QLoRAFineTuner:
     def __init__(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print('device:', self.device)
+        print("device:", self.device)
         self.model_name = "mistralai/Mistral-7B-Instruct-v0.3"
         self.dataset_name = "euclaise/logician"
         self.output_dir = "./model_outputs/qlora_mistral_finetuned"
@@ -38,31 +38,36 @@ class QLoRAFineTuner:
             # Concatenate instruction and response
             input_text = f"Instruction: {example['instruction']} [SEP] Response: {example['response']}"
 
-            # Tokenize the entire sequence
+            # Tokenize the sequence
             tokenized = self.tokenizer(
                 input_text,
-                truncation=True,
-                max_length=128,  # Longer max length to accommodate both instruction and response
-                padding="max_length"
+                truncation=True,  # Ensure sequences are truncated to max model length
+                max_length=self.tokenizer.model_max_length,  # Use model's max length dynamically
+                padding="max_length"  # Pad sequences shorter than max length
             )
 
-            # Mask `instruction` segment in the loss by setting them to -100
+            # Mask the `instruction` segment in the loss by setting them to -100
             labels = tokenized["input_ids"].copy()
-            instruction_length = len(self.tokenizer(f"Instruction: {example['instruction']} [SEP]")["input_ids"])
+            instruction_length = len(
+                self.tokenizer(f"Instruction: {example['instruction']} [SEP]")["input_ids"]
+            )
             labels[:instruction_length] = [-100]  # Ignore loss for instruction
 
             tokenized["labels"] = labels
             return tokenized
 
-        # Apply tokenization to the dataset
-        tokenized_dataset = self.dataset.map(tokenize_function, batched=True)
+        tokenized_dataset = self.dataset.map(
+            tokenize_function,
+            batched=True,
+            remove_columns=self.dataset["train"].column_names,  # Remove original columns
+            batch_size=32  # Process in batches for efficiency
+        )
 
         # Train/Test Split
         train_test = tokenized_dataset["train"].train_test_split(test_size=0.2, seed=42)
         self.processed_dataset = DatasetDict({
             "train": train_test["train"],
             "validation": train_test["test"].train_test_split(test_size=0.5, seed=42)["test"],
-            # Create validation and test
             "test": train_test["test"].train_test_split(test_size=0.5, seed=42)["train"],
         })
 
@@ -109,6 +114,7 @@ class QLoRAFineTuner:
         trainer.train()
         trainer.save_model(self.output_dir)
         print(f"Model saved to {self.output_dir}")
+
 
 if __name__ == "__main__":
     finetuner = QLoRAFineTuner()
