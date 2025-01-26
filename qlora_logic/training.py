@@ -34,53 +34,68 @@ class QLoRAFineTuner:
         self.dataset = load_dataset(self.dataset_name)
 
     def tokenize_dataset(self):
-        # Get the tokenizer's max supported length
-        max_length = self.tokenizer.model_max_length
-        print(f"Tokenizer max length: {max_length}")
+        # Retrieve the tokenizer's maximum model length with a fallback
+        max_length = min(self.tokenizer.model_max_length, 1024)  # Use 1024 as an upper bound for safety
+        print(f"Tokenizer max length constrained to: {max_length}")
 
-        # Filter dataset entries based on text length
+        # Filter the dataset to exclude entries that are too long
         def filter_function(example):
-            # Rough estimate of token count by assuming average word length + spaces
+            # Concatenate instruction and response
             input_text = f"Instruction: {example['instruction']} [SEP] Response: {example['response']}"
-            approx_token_length = len(input_text.split())  # Approximate token count based on word count
-            return approx_token_length <= max_length * 1.5  # Adjust factor for tokenization overhead
+            # Tokenize and check token count directly (guaranteeing no overflow)
+            tokenized_length = len(
+                self.tokenizer(
+                    input_text,
+                    truncation=False,  # Don't truncate; we want full token count
+                    add_special_tokens=True
+                )["input_ids"]
+            )
+            return tokenized_length <= max_length
 
+        # Log dataset size before and after filtering
         print(f"Original dataset size: {len(self.dataset['train'])}")
         self.dataset = self.dataset.filter(filter_function)
         print(f"Filtered dataset size: {len(self.dataset['train'])}")
 
         # Tokenize the dataset
         def tokenize_function(example):
-            # Concatenate instruction and response
+            # Concatenate instruction and response into a single input text
             input_text = f"Instruction: {example['instruction']} [SEP] Response: {example['response']}"
+            try:
+                # Tokenize with truncation and padding enabled
+                tokenized = self.tokenizer(
+                    input_text,
+                    truncation=True,  # Ensure truncation if text exceeds max_length
+                    max_length=max_length,
+                    padding="max_length"  # Pad shorter sequences to the max length
+                )
+            except OverflowError as e:
+                print(f"OverflowError with example: {example}, skipping.")
+                return None
 
-            # Tokenize with truncation and padding
-            tokenized = self.tokenizer(
-                input_text,
-                truncation=True,
-                max_length=max_length,
-                padding="max_length"
-            )
-
-            # Mask the instruction segment in the loss by setting them to -100
+            # Mask part of the input for loss calculation
             labels = tokenized["input_ids"].copy()
             instruction_length = len(
-                self.tokenizer(f"Instruction: {example['instruction']} [SEP]", truncation=True, max_length=max_length)[
-                    "input_ids"]
+                self.tokenizer(
+                    f"Instruction: {example['instruction']} [SEP]",
+                    truncation=True,
+                    max_length=max_length  # Ensure bounds
+                )["input_ids"]
             )
-            labels[:instruction_length] = [-100]  # Ignore loss for instruction
+            labels[:instruction_length] = [-100]  # Ignore instruction in computing loss
 
             tokenized["labels"] = labels
             return tokenized
 
-        # Tokenize dataset
+        # Run tokenization batch-wise for efficiency
         tokenized_dataset = self.dataset.map(
             tokenize_function,
             batched=True,
-            batch_size=16  # Use a batch size suitable for your system
+            batch_size=16,  # Adjust batch size to fit memory constraints
+            num_proc=4  # Use multiprocessing if available for performance
         )
 
-        # Train/Test Split
+        # Split the tokenized dataset into train, validation, and test sets
         train_test = tokenized_dataset["train"].train_test_split(test_size=0.2, seed=42)
         self.processed_dataset = DatasetDict({
             "train": train_test["train"],
