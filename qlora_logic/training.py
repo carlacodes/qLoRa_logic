@@ -87,12 +87,11 @@ class QLoRAFineTuner:
             tokenized["labels"] = labels
             return tokenized
 
-        # Run tokenization batch-wise for efficiency
+        # Run tokenization sequentially for simplicity
         tokenized_dataset = self.dataset.map(
             tokenize_function,
             batched=True,
             batch_size=16,  # Adjust batch size to fit memory constraints
-            num_proc=4  # Use multiprocessing if available for performance
         )
 
         # Split the tokenized dataset into train, validation, and test sets
