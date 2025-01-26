@@ -1,6 +1,7 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer
 from datasets import load_dataset
+from transformers import DataCollatorForLanguageModeling
 from peft import LoraConfig, get_peft_model, TaskType
 from datasets import DatasetDict
 from transformers import BitsAndBytesConfig
@@ -40,14 +41,12 @@ class QLoRAFineTuner:
 
         # Filter the dataset to exclude entries that are too long
         def filter_function(example):
-            # Concatenate instruction and response
             input_text = f"Instruction: {example['instruction']} [SEP] Response: {example['response']}"
-            # Tokenize and check token count directly (guaranteeing no overflow)
             tokenized_length = len(
                 self.tokenizer(
                     input_text,
-                    truncation=False,  # Don't truncate; we want full token count
-                    add_special_tokens=True
+                    truncation=False,
+                    add_special_tokens=True,
                 )["input_ids"]
             )
             return tokenized_length <= max_length
@@ -58,40 +57,43 @@ class QLoRAFineTuner:
         print(f"Filtered dataset size: {len(self.dataset['train'])}")
 
         # Tokenize the dataset
-        def tokenize_function(example):
-            # Concatenate instruction and response into a single input text
-            input_text = f"Instruction: {example['instruction']} [SEP] Response: {example['response']}"
-            try:
-                # Tokenize with truncation and padding enabled
-                tokenized = self.tokenizer(
-                    input_text,
-                    truncation=True,  # Ensure truncation if text exceeds max_length
-                    max_length=max_length,
-                    padding="max_length"  # Pad shorter sequences to the max length
-                )
-            except OverflowError as e:
-                print(f"OverflowError with example: {example}, skipping.")
-                return None
+        def tokenize_function(batch):
+            # Extract lists of instructions and responses from the batch
+            input_texts = [
+                f"Instruction: {instruction} [SEP] Response: {response}"
+                for instruction, response in zip(batch["instruction"], batch["response"])
+            ]
 
-            # Mask part of the input for loss calculation
-            labels = tokenized["input_ids"].copy()
-            instruction_length = len(
-                self.tokenizer(
-                    f"Instruction: {example['instruction']} [SEP]",
-                    truncation=True,
-                    max_length=max_length  # Ensure bounds
-                )["input_ids"]
+            # Tokenize the input texts with padding and truncation
+            tokenized = self.tokenizer(
+                input_texts,
+                truncation=True,
+                max_length=max_length,
+                padding="max_length",
+                return_tensors="pt",  # Ensure tensors are returned directly
             )
-            labels[:instruction_length] = [-100]  # Ignore instruction in computing loss
 
+            # Create labels by copying input_ids
+            labels = tokenized["input_ids"].clone()
+            for i, (instruction, response) in enumerate(zip(batch["instruction"], batch["response"])):
+                instruction_length = len(
+                    self.tokenizer(
+                        f"Instruction: {instruction} [SEP]",
+                        truncation=True,
+                        max_length=max_length,
+                    )["input_ids"]
+                )
+                # Mask the instruction portion of the input
+                labels[i][:instruction_length] = -100
             tokenized["labels"] = labels
             return tokenized
 
-        # Run tokenization sequentially for simplicity
+        # Apply tokenization sequentially for simplicity
         tokenized_dataset = self.dataset.map(
             tokenize_function,
-            batched=True,
-            batch_size=16,  # Adjust batch size to fit memory constraints
+            batched=True,  # Process batches
+            batch_size=16,  # Ensure batch size matches processing capacity
+            remove_columns=self.dataset["train"].column_names,  # Remove original columns
         )
 
         # Split the tokenized dataset into train, validation, and test sets
@@ -135,12 +137,18 @@ class QLoRAFineTuner:
         )
 
     def train_model(self):
+        # Use DataCollatorForLanguageModeling
+        data_collator = DataCollatorForLanguageModeling(
+            tokenizer=self.tokenizer,
+            mlm=False  # Disable MLM as this is causal LM training
+        )
+
         trainer = Trainer(
             model=self.model,
             args=self.training_args,
             train_dataset=self.processed_dataset["train"],
             eval_dataset=self.processed_dataset["validation"],
-            tokenizer=self.tokenizer
+            data_collator=data_collator,  # Correctly specify the data collator
         )
         trainer.train()
         trainer.save_model(self.output_dir)
