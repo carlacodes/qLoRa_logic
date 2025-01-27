@@ -114,6 +114,13 @@ class QLoRAFineTuner:
             lora_dropout=0.05
         )
         self.model = get_peft_model(self.model, lora_config)
+
+        # Ensure trainable parameters have requires_grad=True
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                print(f"{name} requires gradients.")
+            else:
+                print(f"WARNING: {name} does not require gradients!")
         self.model.print_trainable_parameters()
 
     def prepare_training_args(self):
