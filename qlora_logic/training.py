@@ -5,6 +5,8 @@ from transformers import DataCollatorForLanguageModeling
 from peft import LoraConfig, get_peft_model, TaskType
 from datasets import DatasetDict
 from transformers import BitsAndBytesConfig
+from peft import prepare_model_for_kbit_training
+
 
 class QLoRAFineTuner:
     def __init__(self):
@@ -22,16 +24,24 @@ class QLoRAFineTuner:
 
         # Apply quantization first
         quantization_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_enable_fp32_cpu_offload=False
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
         )
-        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="cuda:0",
+        model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map="cuda:0",
                                                           quantization_config=quantization_config)
+        model = prepare_model_for_kbit_training(model)
 
-        # Now, apply LoRA adapters
-        self.configure_lora()
-
-        self.model.gradient_checkpointing_enable()
+        config = LoraConfig(
+            r=16,
+            lora_alpha=8,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+        self.model = get_peft_model(model, config)
 
     def load_dataset(self):
         self.dataset = load_dataset(self.dataset_name)
@@ -66,7 +76,8 @@ class QLoRAFineTuner:
             labels = tokenized["input_ids"].clone()
             for i, (instruction, response) in enumerate(zip(batch["instruction"], batch["response"])):
                 instruction_length = len(
-                    self.tokenizer(f"Instruction: {instruction} [SEP]", truncation=True, max_length=max_length)["input_ids"]
+                    self.tokenizer(f"Instruction: {instruction} [SEP]", truncation=True, max_length=max_length)[
+                        "input_ids"]
                 )
                 labels[i][:instruction_length] = -100
             tokenized["labels"] = labels
@@ -86,29 +97,6 @@ class QLoRAFineTuner:
             "test": train_test["test"].train_test_split(test_size=0.5, seed=42)["train"],
         })
 
-    def configure_lora(self):
-        target_modules = ["self_attn.q_proj", "self_attn.v_proj"]  # Adjusted target modules
-
-        self.lora_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            inference_mode=False,
-            r=16,
-            lora_alpha=32,
-            target_modules=target_modules,
-            lora_dropout=0.05,
-            bias="none"
-        )
-
-        # Apply LoRA to the model
-        self.model = get_peft_model(self.model, self.lora_config)
-
-        # Ensure LoRA parameters require gradients, specifically for the floating-point weights
-        for name, param in self.model.named_parameters():
-            if any(layer in name for layer in target_modules) and param.dtype in [torch.float32, torch.float64]:
-                print(f"Setting requires_grad=True for {name}")
-                param.requires_grad = True
-
-        self.model.print_trainable_parameters()
 
     def prepare_training_args(self):
         self.training_args = TrainingArguments(
@@ -144,7 +132,6 @@ class QLoRAFineTuner:
             train_dataset=self.processed_dataset["train"],
             eval_dataset=self.processed_dataset["validation"],
             data_collator=data_collator,
-            peft_config=self.lora_config  # Pass the LoRA config to the Trainer
         )
 
         trainer.create_optimizer()
@@ -165,11 +152,12 @@ class QLoRAFineTuner:
         trainer.save_model(self.output_dir)
         print(f"Model saved to {self.output_dir}")
 
+
 if __name__ == "__main__":
     finetuner = QLoRAFineTuner()
     finetuner.load_tokenizer_and_model()
     finetuner.load_dataset()
     finetuner.tokenize_dataset()
     finetuner.prepare_training_args()
-    print(finetuner.device)
     finetuner.train_model()
+
