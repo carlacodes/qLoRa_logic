@@ -36,7 +36,7 @@ class QLoRAFineTuner:
         config = LoraConfig(
             r=16,
             lora_alpha=8,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            target_modules=["q_proj", "v_proj"],
             lora_dropout=0.05,
             bias="none",
             task_type="CAUSAL_LM"
